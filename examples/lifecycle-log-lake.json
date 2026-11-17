@@ -1,0 +1,5 @@
+[
+  {"fileNamePrefix": "bags/", "daysFromUploadingToHiding": 365, "daysFromHidingToDeleting": 30},
+  {"fileNamePrefix": "rrd/", "daysFromUploadingToHiding": 365, "daysFromHidingToDeleting": 30},
+  {"fileNamePrefix": "events/", "daysFromUploadingToHiding": 90, "daysFromHidingToDeleting": 7}
+]

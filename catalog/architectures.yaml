@@ -1,0 +1,509 @@
+schema_version: 2.0.0
+updated: "2026-11-16"
+canonical_documentation: https://www.backblaze.com/docs/cloud-storage-ai-machine-learning
+related_categories:
+  - name: AI Data Providers
+    url: https://github.com/backblaze-b2-samples/b2-ai-data-provider-reference-architectures
+  - name: Generative Video
+    url: https://github.com/backblaze-b2-samples/b2-gen-video-reference-architectures
+  - name: Image Generation
+    url: https://github.com/backblaze-b2-samples/b2-image-generation-reference-architectures
+  - name: Autonomous Vehicles
+    url: https://github.com/backblaze-b2-samples/b2-autonomous-vehicle-reference-architectures
+  - name: Commercial Drones
+    url: https://github.com/backblaze-b2-samples/b2-commercial-drone-reference-architectures
+architectures:
+  - id: robot-log-offload
+    name: Offload robot logs from the fleet into a raw log lake
+    slug: robot-log-offload
+    summary: Robots record split rosbag2/MCAP files locally; an offload agent uploads each closed split to B2 over intermittent links, deletes the local copy only after the stored version's size and SHA-256 match the closed split, catalogs each session in Parquet, and copies incident windows into a separate Object Lock evidence bucket.
+    audience:
+      - Robotics fleet and data-infrastructure engineers
+      - Field operations and site reliability teams
+      - Security and safety-case owners
+    problem: Robots generate far more log data than site uplinks can carry and local disks fill up; engineers need a durable, cataloged record of every session without handing long-lived, broad storage credentials to every robot.
+    workflow:
+      - ros2 bag record writes MCAP splits, capped by duration or size, to the on-robot buffer
+      - For each closed split the offload agent gets a short-lived presigned PUT from a site service (presigned upload-part URLs above 5 GB), or a depot or dock runs rclone for bulk or drive-swap offload
+      - Splits land under `bags/<robot>/<session>/`
+      - The site service verifies the uploaded version's byte count and full-file SHA-256, then acknowledges local deletion
+      - A describe step reads rosbag2 metadata.yaml, writes metadata.json, and rolls the catalog/ Parquet index, inline or from B2 Event Notifications where enabled
+      - Edge perception uploads only flagged frames and prediction JSON under `events/<robot>/` as triage signals
+      - Incident windows are server-side copied into an Object Lock evidence bucket under `evidence/<incident_id>/` with a hash manifest
+      - Lifecycle rules hide and then delete raw splits after the retention window; locked evidence is not removed by lifecycle
+    capabilities:
+      - S3-compatible API
+      - Presigned PUT and upload-part URLs
+      - Multipart upload
+      - Application keys restricted to one bucket and name prefix
+      - Event Notifications (enabled by Backblaze Support on request)
+      - Server-side copy (CopyObject, UploadPartCopy)
+      - Object Lock retention and legal hold on a dedicated evidence bucket
+      - Lifecycle rules (hide, then delete)
+    integrations:
+      - id: rosbag2
+        name: ROS 2 rosbag2
+        role: On-robot recording of ROS 2 topics into split MCAP or SQLite bag files
+        connection: "Record bounded MCAP splits locally (`ros2 bag record -s mcap -d <seconds>`); an offload agent presigned-PUTs each closed split to `bags/<robot>/<session>/` and HEAD-confirms it before deleting the local copy (Rosbag2 Cloud Offload sample), and depots move bulk sessions with `rclone move` to the same prefix"
+        connection_type: s3-sync-cli
+        url: https://github.com/ros2/rosbag2
+        setup_url: https://github.com/backblaze-b2-samples/rosbag2-cloud-offload/blob/main/ARCHITECTURE.md
+      # Shared with sim-rollout-datasets through the YAML alias below.
+      - &rclone
+        id: rclone
+        name: rclone
+        role: Bulk sync of closed log, HDF5, or rollout directories from depots, docks, and sim farms
+        connection: Native B2 backend with chunked large-file upload (--b2-chunk-size, --b2-upload-concurrency)
+        connection_type: native-b2-option
+        url: https://rclone.org/b2/
+    prerequisites:
+      - A private B2 log bucket and a separate evidence bucket with Object Lock enabled before retention is applied
+      - A site or fleet service that holds a key restricted to bags/ with listFiles, readFiles and writeFiles (no deleteFiles) and mints presigned PUTs; robots hold no B2 keys
+      - Bounded split size and duration in ros2 bag record so each split closes and uploads independently
+      - An upload queue on the robot that survives reboots and link loss
+    expected_scale:
+      profile: Tens to hundreds of GB per robot-day across a fleet, uploaded in bursts when links allow
+      notes: Standard B2 is the default; upload throughput is usually bounded by the site uplink, not B2. Use multipart for large splits and rclone for depot bulk offload.
+    security_considerations:
+      - Robots receive short-lived presigned PUTs scoped to one key; no per-robot B2 application keys
+      - The signing service key is restricted to the bags/ prefix with listFiles, readFiles (for the HeadObject check) and writeFiles; it has no deleteFiles
+      - Evidence copies use a separate key with writeFileRetentions and writeFileLegalHolds only on the evidence bucket
+      - Treat presigned URLs as bearer credentials and keep their TTL short
+    compliance_considerations:
+      - Logs can contain camera imagery of people and private sites; classify and set retention before collection
+      - Use governance-mode Object Lock by default and compliance mode only for a contractual or regulatory requirement
+      - Record incident hash manifests with the evidence so later copies can be verified
+    links:
+      architecture: architectures/robot-log-offload/architecture.md
+      deployment: https://github.com/backblaze-b2-samples/rosbag2-cloud-offload
+
+  - id: fleet-search-replay
+    name: Search, visualize and replay fleet sessions from the log lake
+    slug: fleet-search-replay
+    summary: Engineers query the session catalog in place to find sessions by robot, date, topic, or event, then open the matching MCAP or RRD files in browser viewers over presigned range reads, or download splits by presigned GET and replay them locally with ros2 bag play.
+    audience:
+      - Robotics software and autonomy engineers
+      - Field triage and QA teams
+      - Data-infrastructure engineers
+    problem: Engineers need to find the right ten minutes across thousands of robot-days without bulk-downloading terabytes of logs.
+    workflow:
+      - catalog/ Parquet holds one row per session or split with robot, time range, topics, ROS distro, and tags
+      - DuckDB httpfs queries the catalog in place on B2 to select sessions
+      - A service mints short-lived presigned GETs for the selected splits
+      - The Foxglove app opens each MCAP over HTTP range requests, with bucket CORS for the Foxglove origins
+      - Alternatively a self-managed Foxglove Primary Site with storageProvider s3_compatible indexes a B2 inbox into a B2 lake bucket
+      - A conversion job writes .rrd recordings under `rrd/<robot>/<session>/` with the Rerun SDK; the Rerun Web Viewer loads them from presigned URLs
+      - ros2 bag play replays a session locally after downloading its splits from a presigned GET manifest
+    capabilities:
+      - S3-compatible API
+      - Range GET
+      - Presigned GET URLs
+      - Bucket CORS rules
+      - Application keys restricted to a name prefix, held only by services
+      - Included egress (see B2 pricing for terms)
+    integrations:
+      - id: duckdb
+        name: DuckDB (httpfs)
+        role: SQL over the session catalog Parquet in place
+        connection: "`CREATE SECRET (TYPE s3, ENDPOINT 's3.<region>.backblazeb2.com', REGION '<region>')`, then query `s3://` paths"
+        connection_type: s3-custom-endpoint
+        url: https://duckdb.org/docs/current/core_extensions/httpfs/s3api.html
+      - id: foxglove-app
+        name: Foxglove app (remote files)
+        role: Browser visualization of MCAP sessions
+        connection: Opens a presigned GET URL to the B2 object directly (no redirects); requires range requests and bucket CORS for the Foxglove origins
+        connection_type: presigned-url
+        url: https://docs.foxglove.dev/docs/visualization/connecting/cloud-data
+      - id: foxglove-primary-site
+        name: Foxglove Primary Site (self-managed)
+        role: Self-hosted ingestion and indexing of recordings for streaming to the Foxglove app
+        connection: Set Helm storageProvider s3_compatible and S3_COMPATIBLE_SERVICE_URL to `https://s3.<region>.backblazeb2.com` for the inbox and lake buckets; configure a B2 Event Notification rule on the inbox and a small adapter that verifies the B2 webhook signature and POSTs to the Primary Site bucket-notifications endpoint
+        connection_type: s3-custom-endpoint
+        url: https://docs.foxglove.dev/docs/primary-sites/installation
+        setup_url: https://docs.foxglove.dev/docs/primary-sites/configure-cloud-credentials
+      - id: rerun-web-viewer
+        name: Rerun Web Viewer
+        role: Browser playback of archived .rrd recordings
+        connection: Pass a presigned GET URL for the .rrd to WebViewer.start(), and add the viewer origin to the bucket CORS rules
+        connection_type: presigned-url
+        url: https://rerun.io/docs
+        setup_url: https://ref.rerun.io/docs/js/0.37.0/web-viewer/classes/WebViewer.html
+    prerequisites:
+      - The catalog/ Parquet index produced by the log-offload architecture
+      - A signing service with read-only keys restricted to bags/ and rrd/ (one key per prefix), and a read-only catalog/ key for DuckDB
+      - Bucket CORS rules for each browser viewer origin, exposing range-related headers
+    expected_scale:
+      profile: Interactive range reads over multi-GB MCAP files by a few to hundreds of engineers
+      notes: Standard B2 is the default. Put a local NVMe cache in front of repeated replays of the same sessions; consider Overdrive only for sustained bulk re-processing.
+    security_considerations:
+      - Viewers receive presigned GETs, never keys; keep TTLs short and treat shared links as bearer credentials
+      - Restrict CORS to the exact viewer origins and to GET and HEAD
+      - The DuckDB and signing keys are read-only and restricted to catalog/, bags/ or rrd/; only the conversion job can write rrd/
+      - A Foxglove Primary Site needs its own keys for inbox read and lake write; keep them out of user-facing services
+    compliance_considerations:
+      - Viewer access is governed by who can mint presigned URLs; log those requests
+      - Session imagery may contain personal data; apply the same retention as the raw log lake
+    links:
+      architecture: architectures/fleet-search-replay/architecture.md
+      deployment: https://docs.foxglove.dev/docs/primary-sites/installation
+
+  - id: teleop-imitation-datasets
+    name: Record teleoperation demonstrations and stream imitation-learning datasets
+    slug: teleop-imitation-datasets
+    summary: Teleop episodes are written in the LeRobot v3 layout or as Zarr replay buffers under versioned dataset prefixes on B2, curated in place, frozen as immutable versions, and streamed to trainers with ranged GETs instead of full downloads.
+    audience:
+      - Robot learning and imitation-learning researchers
+      - Teleoperation and data-collection operations teams
+      - ML platform engineers
+    problem: Demonstration datasets grow to TB scale; training many workers from a hub or local disk copies does not scale, and released dataset versions must stay reproducible.
+    workflow:
+      - Leader-follower, VR, or spacemouse teleop records episodes into the workstation buffer
+      - Closed episodes are written to `drafts/<name>/`; curation writes each release to `datasets/<name>/<version>/` with meta/, data/chunk-*/, and `videos/<camera>/chunk-*/`
+      - Daft reads LeRobot datasets lazily from s3:// for filtering, relabeling, and quality checks; Zarr replay buffers are read through s3fs
+      - The curated version is frozen under its version prefix; DVC can optionally track it, storing its own content-addressed copy under `dvc/`
+      - Trainers read meta/episodes Parquet, then make ranged GETs for only the data rows and MP4 byte ranges each episode needs, split across workers
+      - Presigned GETs serve episode MP4s to review UIs
+    capabilities:
+      - S3-compatible API
+      - Range GET
+      - Presigned GET URLs
+      - Application keys restricted to a name prefix, held only by services
+      - Object Lock for released dataset versions (optional)
+      - Included egress (see B2 pricing for terms)
+    integrations:
+      - id: lerobot
+        name: Hugging Face LeRobot
+        role: Robot-learning dataset format (v3), recording, and training framework
+        connection: "LeRobot records and loads v3 datasets from a local root; sync the finalized dataset directory to `datasets/<name>/<version>/` with rclone or s5cmd and back to each trainer's local root, or stream ranged GETs straight from B2 with the LeRobot B2 Streaming sample"
+        connection_type: s3-sync-cli
+        url: https://github.com/huggingface/lerobot
+        setup_url: https://github.com/backblaze-b2-samples/lerobot-b2-streaming/blob/main/ARCHITECTURE.md
+      - id: daft
+        name: Daft (LeRobot reader)
+        role: Lazy dataframe reads of LeRobot datasets for curation and relabeling
+        connection: "`daft.datasets.lerobot.read('s3://...', io_config=IOConfig(s3=S3Config(endpoint_url='https://s3.<region>.backblazeb2.com')))`"
+        connection_type: s3-custom-endpoint
+        url: https://docs.daft.ai/en/stable/datasets/lerobot/
+        setup_url: https://docs.daft.ai/en/stable/api/config/
+      - id: zarr-s3fs
+        name: Zarr (via s3fs)
+        role: Chunked replay buffers for diffusion-policy and UMI-style training
+        connection: "FsspecStore over `s3fs.S3FileSystem(endpoint_url='https://s3.<region>.backblazeb2.com')`"
+        connection_type: fsspec-s3
+        url: https://zarr.dev/
+        setup_url: https://s3fs.readthedocs.io/en/latest/
+      - id: dvc
+        name: DVC
+        role: Dataset version pointers in git; the DVC remote stores its own content-addressed copy under `dvc/`
+        connection: "`dvc remote modify <name> endpointurl https://s3.<region>.backblazeb2.com`"
+        connection_type: s3-custom-endpoint
+        url: https://dvc.org/
+        setup_url: https://doc.dvc.org/user-guide/data-management/remote-storage/amazon-s3
+    prerequisites:
+      - A private datasets bucket, plus a separate release bucket with Object Lock enabled if released versions must be locked
+      - A recorder key restricted to `drafts/<name>/` (it cannot reach datasets/), a curation key that writes `datasets/<name>/`, and a read-only key for trainers
+      - A dataset version naming policy so released prefixes are never rewritten
+    expected_scale:
+      profile: Thousands to millions of episodes with multi-camera MP4 and Parquet state/action shards, read by many training workers
+      notes: Standard B2 is the default. Ranged reads keep per-epoch transfer proportional to what is used; consider Overdrive for sustained multi-node streaming, and a local cache for repeated epochs on the same version.
+    security_considerations:
+      - Trainers use read-only keys restricted to the released dataset prefix
+      - The recording workstation writes only `drafts/<name>/`; curation jobs write a new version prefix rather than rewriting a released one
+      - Review UIs get short-lived presigned GETs, not keys
+    compliance_considerations:
+      - Teleop video can capture operators and bystanders; record consent and redaction in the dataset card
+      - Keep released versions immutable so trained policies can be traced to exact data
+    links:
+      architecture: architectures/teleop-imitation-datasets/architecture.md
+      deployment: https://github.com/backblaze-b2-samples/lerobot-b2-streaming
+
+  - id: sim-rollout-datasets
+    name: Generate simulation rollouts and synthetic demonstrations at scale
+    slug: sim-rollout-datasets
+    summary: Parallel simulation workers load shared USD and MJCF assets from B2 and write each completed episode (video, state/action/reward arrays, summary JSON) to an append-only run prefix used for behavioral cloning, offline RL, and evaluation baselines.
+    audience:
+      - Simulation and sim-to-real engineers
+      - Reinforcement-learning researchers
+      - ML platform engineers running GPU sim farms
+    problem: Simulation sweeps produce millions of small and medium episode artifacts across many workers; teams need a shared asset source and a durable sink without a shared filesystem.
+    workflow:
+      - USD and MJCF assets live under sim-assets/; Isaac Sim can load them through an asset region profile pointed at the B2 endpoint
+      - Ray or the cluster scheduler fans rollout workers out across GPUs
+      - Each worker writes only completed episodes to `rollouts/<env>/<policy>/<run_id>/episode-<n>/` plus a run config.json
+      - Simulator outputs written in place (for example HDF5) are closed locally, then synced to B2 with rclone as immutable files
+      - Presigned GETs feed dataset explorers and review
+      - Lifecycle rules expire scratch sweeps and purge hidden versions under rollouts/; promoted runs are server-side copied into datasets/
+    capabilities:
+      - S3-compatible API
+      - Presigned GET URLs
+      - Multipart upload
+      - Server-side copy (promote a run to a dataset)
+      - Version-aware deletes for discarded runs (DeleteObjects without VersionId only hides on B2)
+      - Lifecycle rules (hide, then delete)
+    integrations:
+      - id: mujoco-playground
+        name: MuJoCo Playground
+        role: GPU-accelerated MuJoCo environments and policy rollouts
+        connection: "Write each finished episode (MP4, .npy state/action/reward arrays, summary JSON) to a local run directory, then sync closed episodes to `rollouts/<env>/<policy>/<run_id>/` with rclone or s5cmd; the MuJoCo Rollout Dataset sample writes the same layout directly with boto3"
+        connection_type: s3-sync-cli
+        url: https://playground.mujoco.org/
+        setup_url: https://github.com/backblaze-b2-samples/mujoco-rollout-dataset/blob/main/ARCHITECTURE.md
+      - id: isaac-sim
+        name: NVIDIA Isaac Sim (asset region profiles)
+        role: Loading USD simulation assets from S3-compatible storage
+        connection: Define an isaacsim.storage.native asset_region_profiles entry with endpoint `https://s3.<region>.backblazeb2.com`, bucket, and region, and select it with ISAACSIM_ASSET_REGION_PROFILE
+        connection_type: s3-custom-endpoint
+        url: https://developer.nvidia.com/isaac/sim
+        setup_url: https://docs.isaacsim.omniverse.nvidia.com/6.1.0/py/source/extensions/isaacsim.storage.native/docs/SETTINGS.html
+      - *rclone
+    prerequisites:
+      - A private sim bucket with sim-assets/, rollouts/, and datasets/ prefixes, or separate buckets when retention differs
+      - Read-only asset keys for workers and a writer key restricted to rollouts/
+      - A run ID scheme so retries write nothing outside their own run prefix
+    expected_scale:
+      profile: Millions of small and medium episode objects per sweep written by many concurrent workers
+      notes: Standard B2 is the default. Batch small arrays per episode instead of one object per step; consider Overdrive only when sustained sweep writes or reads saturate Standard throughput.
+    security_considerations:
+      - Workers hold a writer key restricted to rollouts/ and a read-only key for sim-assets/
+      - Promotion to datasets/ and deletes of discarded runs use a separate operator key
+      - Isaac Sim asset profiles are applied in memory; supply credentials from the environment, not committed settings files
+    compliance_considerations:
+      - Record simulator version, asset version, seed, and policy checkpoint in each run config.json for reproducibility
+      - Synthetic data inherits the licenses of its assets; record them with the run
+    links:
+      architecture: architectures/sim-rollout-datasets/architecture.md
+      deployment: https://github.com/backblaze-b2-samples/mujoco-rollout-dataset
+
+  - id: policy-training-registry
+    name: Train and evaluate robot policies, checkpoint runs, and release models to the fleet
+    slug: policy-training-registry
+    summary: Distributed visuomotor and VLA policy training streams data from B2 and writes checkpoints for fault-tolerant resume; runs and eval artifacts are tracked with lineage to dataset versions, and promoted policies are copied to a locked release prefix that robots and CI pull by presigned GET.
+    audience:
+      - Robot learning and ML platform engineers
+      - Evaluation and release engineers
+      - Fleet software teams
+    problem: Checkpoints range from hundreds of MB to tens of GB and accumulate across many runs; teams need resume after preemption, reproducible dataset-to-policy-to-eval lineage, and a controlled path for shipping models to the fleet.
+    workflow:
+      - Trainers stream WebDataset shards or LeRobot v3 episodes from B2
+      - Ray Train storage_path with endpoint_override writes `checkpoints/<run_id>/`; CheckpointConfig(num_to_keep=K) prunes older checkpoints
+      - MLflow (b2:// artifact root) or ClearML records runs and artifacts; W&B reference artifacts track dataset and checkpoint lineage without copying bytes
+      - Candidate policies run sim benchmark suites; eval videos and metrics go to `eval/<policy_version>/<suite>/`
+      - Promoted checkpoints are server-side copied to `models/<policy>/<version>/` in an Object Lock bucket with retention set
+      - A fleet release service mints presigned GETs for each release file; robots and CI download with them and hold no B2 keys; base VLA weights are cached once in B2 with hf-cache-sync
+      - Lifecycle rules clean up hidden versions and abandoned run prefixes
+    capabilities:
+      - S3-compatible API
+      - Multipart upload
+      - Server-side copy
+      - Object Lock for released policies
+      - Presigned GET URLs
+      - Application keys restricted to a name prefix, held only by services
+      - Lifecycle rules (hide, then delete)
+    integrations:
+      - id: ray-train
+        name: Ray Train
+        role: Distributed training with checkpoint persistence and resume
+        connection: "Configure Ray checkpoint storage: `storage_path='s3://<bucket>/<path>?endpoint_override=https://s3.<region>.backblazeb2.com'`, or set `AWS_ENDPOINT_URL_S3` and use a plain `s3://` path"
+        connection_type: s3-custom-endpoint
+        url: https://docs.ray.io/en/latest/train/user-guides/persistent-storage.html
+        setup_url: https://docs.ray.io/en/latest/train/user-guides/persistent-storage.html#s3-compatible-storage-backblaze-b2-minio-etc
+      - id: mlflow
+        name: MLflow
+        role: Experiment tracking and model registry artifact store
+        connection: Native `b2://<bucket>@s3.<region>.backblazeb2.com/<path>` artifact URI
+        connection_type: native-b2-option
+        url: https://mlflow.org/
+        setup_url: https://mlflow.org/docs/latest/self-hosting/architecture/artifact-store/#backblaze-b2
+      - id: wandb
+        name: Weights & Biases (reference artifacts)
+        role: Lineage tracking of datasets and checkpoints stored in B2
+        connection: "Set `AWS_S3_ENDPOINT_URL=https://s3.<region>.backblazeb2.com` and log `s3://` references"
+        connection_type: s3-custom-endpoint
+        url: https://wandb.ai/
+        setup_url: https://docs.coreweave.com/guides/artifacts/track-external-files
+      - id: clearml
+        name: ClearML
+        role: Experiment tracking, artifact storage, and pipeline orchestration
+        connection: "Add an sdk.aws.s3.credentials entry with `host: 's3.<region>.backblazeb2.com:443'` and `secure: true` (the port is required)"
+        connection_type: s3-custom-endpoint
+        url: https://clear.ml/
+        setup_url: https://clear.ml/docs/latest/docs/integrations/storage/
+    prerequisites:
+      - A training bucket for checkpoints/ and eval/, and a separate release bucket with Object Lock enabled before retention is applied
+      - A tracking server (MLflow, ClearML, or W&B) with its metadata database off B2
+      - A promotion job holding the only key that can write models/ and set retention
+    expected_scale:
+      profile: Multi-GB checkpoints written periodically by multi-node GPU jobs, plus eval video per candidate
+      notes: Standard B2 is the default. Checkpoint writes are bursty multipart uploads; consider Overdrive when many nodes read training data in parallel for sustained periods, and stage to local NVMe for repeated epochs.
+    security_considerations:
+      - Training jobs hold keys restricted to checkpoints/ and eval/; they cannot write models/
+      - Robots and CI pull releases with presigned GETs minted by a fleet release service that holds the only read key on `models/<policy>/`; robots hold no B2 keys
+      - Use governance-mode Object Lock by default on releases; compliance mode cannot be shortened or removed
+      - Verify release checksums on the robot before loading a policy
+    compliance_considerations:
+      - Keep dataset version, code commit, and eval results with each released policy for safety review
+      - Base model licenses travel with cached weights; record them alongside the release
+    links:
+      architecture: architectures/policy-training-registry/architecture.md
+      deployment: https://docs.ray.io/en/latest/train/user-guides/persistent-storage.html
+
+  - id: mapping-session-archive
+    name: Archive LiDAR mapping sessions and publish site maps to robots
+    slug: mapping-session-archive
+    summary: LiDAR scans from mobile robots are archived per session; odometry and point-cloud jobs write poses, map snapshots, and trajectories beside the raw scans, and approved site maps are promoted to versioned prefixes that robots and RViz pull by presigned GET.
+    audience:
+      - Mapping and localization engineers
+      - Mobile-robot deployment teams
+      - Perception data engineers
+    problem: Re-mapping sites, updating localization maps, and debugging drift all need raw scans and every derived artifact kept together per session at GB to TB per site, without a shared filesystem.
+    workflow:
+      - Scans upload to `scans/<robot_id>/<session_id>/` by presigned PUT, with multipart for large map snapshots
+      - KISS-ICP jobs write poses, `maps/<session_id>/map_*.ply`, and `trajectories/<session_id>/` next to an index.json
+      - Open3D jobs downsample, register, and mesh under `jobs/<id>/` with JSON manifests and presigned previews
+      - Approved site maps are server-side copied to `sitemaps/<site>/<version>/` and served to robots and RViz by presigned GET
+      - Rejected or re-mapped sessions are deleted by version (ListObjectVersions, then DeleteObjects with VersionId), or hidden and purged by a daysFromHidingToDeleting lifecycle rule; lifecycle rules also expire intermediate job outputs
+    capabilities:
+      - S3-compatible API
+      - Multipart upload
+      - Presigned GET and PUT URLs
+      - Server-side copy
+      - Version-aware deletes (DeleteObjects without VersionId only hides on B2)
+      - Lifecycle rules (hide, then delete)
+    integrations:
+      - id: kiss-icp
+        name: KISS-ICP
+        role: LiDAR odometry and mapping
+        connection: "kiss_icp_pipeline writes poses (.npy, KITTI, TUM), config, and logs to a local results directory; sync each session's results to `trajectories/<session_id>/` with rclone or s5cmd; the KISS-ICP LiDAR Archive sample does the same with boto3 and presigned URLs"
+        connection_type: s3-sync-cli
+        url: https://github.com/PRBonn/kiss-icp
+        setup_url: https://github.com/backblaze-b2-samples/kiss-icp-lidar-archive/blob/main/ARCHITECTURE.md
+      - id: open3d
+        name: Open3D
+        role: Point-cloud downsampling, registration, meshing, and rendering
+        connection: "Open3D reads and writes PLY and PCD on local paths (`o3d.io.read_point_cloud`, `write_point_cloud`); copy scans down and sync job outputs to `jobs/<id>/` with rclone or s5cmd; the Open3D Point Cloud Pipeline sample does the same with the S3 API"
+        connection_type: s3-sync-cli
+        url: https://www.open3d.org/
+        setup_url: https://github.com/backblaze-b2-samples/open3d-point-cloud-pipeline/blob/main/ARCHITECTURE.md
+    prerequisites:
+      - A private mapping bucket with scans/, maps/, trajectories/, jobs/, and sitemaps/ prefixes
+      - A signing service for robot uploads and map downloads; robots hold no B2 keys
+      - A map approval step owned by a key that alone can write sitemaps/
+    expected_scale:
+      profile: GB to TB of scans per site, with periodic re-mapping and many robots pulling the current site map
+      notes: Standard B2 is the default; site maps are small relative to scans and can be cached on the robot or at the site.
+    security_considerations:
+      - Robots upload scans and fetch maps through presigned URLs minted by a site service
+      - Processing jobs read scans/ and write only their own derived prefixes
+      - Only the approval job can write sitemaps/; robots never read unapproved maps
+    compliance_considerations:
+      - Maps of customer sites can be confidential; scope signing and retention per customer or site
+      - Keep the source session ID and job manifest with each promoted map version
+    links:
+      architecture: architectures/mapping-session-archive/architecture.md
+      deployment: https://github.com/backblaze-b2-samples/kiss-icp-lidar-archive
+
+samples:
+  - id: rosbag2-cloud-offload
+    name: Rosbag2 Cloud Offload
+    url: https://github.com/backblaze-b2-samples/rosbag2-cloud-offload
+    group: workflow
+    summary: Presigned-PUT offload of closed rosbag2 splits, HEAD-confirmed local deletes, a Parquet session catalog, and ros2 bag play replay from presigned GETs
+    description: A watcher presigned-PUTs each closed rosbag2 split to `bags/<robot>/<session>/` while recording continues, deletes local copies only after head_object confirms them, describes sessions from metadata.yaml into a Parquet catalog, and replays sessions from a presigned GET manifest.
+    architectures: [robot-log-offload, fleet-search-replay]
+
+  - id: lerobot-b2-streaming
+    name: LeRobot B2 Streaming
+    url: https://github.com/backblaze-b2-samples/lerobot-b2-streaming
+    group: workflow
+    summary: LeRobot v3 teleop datasets on B2 streamed to training workers with ranged GETs planned from the meta/episodes index
+    description: Records LeRobot v3 episodes to B2 under one prefix per episode and streams them back to N workers by ranged-GETting only the Parquet row groups and MP4 byte windows each episode needs.
+    architectures: [teleop-imitation-datasets]
+    relevance: Its per-episode prefix layout differs from the versioned `datasets/<name>/<version>/` layout recommended here
+
+  - id: mujoco-rollout-dataset
+    name: MuJoCo Rollout Dataset
+    url: https://github.com/backblaze-b2-samples/mujoco-rollout-dataset
+    group: workflow
+    summary: MuJoCo Playground rollouts written to B2 as per-episode MP4, state/action/reward arrays, and summary JSON
+    description: Rolls out MuJoCo Playground policies, renders each episode to video, and writes the video plus per-step state, action, and reward arrays and a summary JSON to B2 for behavioral cloning and offline analysis.
+    architectures: [sim-rollout-datasets]
+
+  - id: kiss-icp-lidar-archive
+    name: KISS-ICP LiDAR Archive
+    url: https://github.com/backblaze-b2-samples/kiss-icp-lidar-archive
+    group: workflow
+    summary: KISS-ICP odometry over LiDAR scans with scans, poses, .ply maps, and trajectories archived per session on B2
+    description: Ingests LiDAR scan frames, runs KISS-ICP odometry and mapping on the backend, and archives scans, poses, point-cloud maps, and trajectories per session over the S3-compatible API.
+    architectures: [mapping-session-archive]
+
+  - id: open3d-point-cloud-pipeline
+    name: Open3D Point Cloud Pipeline
+    url: https://github.com/backblaze-b2-samples/open3d-point-cloud-pipeline
+    group: workflow
+    summary: Downsampling, registration, meshing, and rendering of point clouds stored on B2, with JSON job manifests
+    description: Ingests PLY, PCD, LAS, and LAZ scans into B2, then downsamples, registers, meshes, and renders them, writing every artifact and a JSON job manifest back to B2.
+    architectures: [mapping-session-archive]
+
+  - id: roboflow-inference-frame-archive
+    name: Roboflow Inference Frame Archive
+    url: https://github.com/backblaze-b2-samples/roboflow-inference-frame-archive
+    group: building-block
+    summary: Edge-triggered capture that archives only flagged frames, prediction JSON, and Parquet roll-ups to B2
+    description: Runs Roboflow Inference on each frame on-device and archives only flagged detections (the JPEG frame, its prediction JSON, and an hourly Parquet roll-up) to B2. The pattern for event-triggered capture on robots.
+    architectures: [robot-log-offload]
+
+  - id: duckdb-query-in-place
+    name: DuckDB Query In Place
+    url: https://github.com/backblaze-b2-samples/duckdb-query-in-place
+    group: building-block
+    summary: SQL over Parquet, CSV, and JSON on B2 with DuckDB httpfs, materializing results back to B2
+    description: Runs SQL directly against Parquet, CSV, and JSON in B2 with DuckDB httpfs and materializes results back to B2 as Parquet. The pattern behind querying the session catalog in place.
+    architectures: [fleet-search-replay]
+
+  - id: b2-event-broker
+    name: B2 Event Broker
+    url: https://github.com/backblaze-b2-samples/b2-event-broker
+    group: building-block
+    summary: Fan-out of B2 Event Notifications to multiple subscribers
+    description: Forwards B2 Event Notification messages to multiple subscribers, such as a describe or catalog job that runs when a bag split arrives.
+    architectures: [robot-log-offload]
+
+  - id: webdataset-streaming-pytorch-training
+    name: WebDataset Streaming PyTorch Training
+    url: https://github.com/backblaze-b2-samples/webdataset-streaming-pytorch-training
+    group: building-block
+    summary: WebDataset tar shards streamed from B2 into a PyTorch IterableDataset, split by worker and node
+    description: Packs media into .tar shards on B2 and streams them back into PyTorch as an IterableDataset with no local staging disk and a distributed worker and node shard split.
+    architectures: [policy-training-registry]
+
+  - id: ray-train-tune-checkpoints
+    name: Ray Train/Tune checkpoints notebook
+    url: https://github.com/backblaze-b2-samples/notebooks/tree/main/ray-train-tune-checkpoints
+    group: building-block
+    summary: Ray Train and Tune checkpoints written to B2 persistent storage
+    description: Notebook that configures Ray Train and Tune persistent storage on B2 and writes checkpoints there.
+    architectures: [policy-training-registry]
+
+  - id: hf-cache-sync
+    name: HF Cache Sync
+    url: https://github.com/backblaze-labs/hf-cache-sync
+    group: building-block
+    summary: Shared Hugging Face hub cache on B2 so trainers, CI, and robots pull base models once
+    description: Syncs the local Hugging Face cache to B2 or S3 so machines and CI share one copy of base model weights instead of repeating hub downloads.
+    architectures: [policy-training-registry]
+
+  - id: b2-integration-mountpoint-csi
+    name: Mountpoint for S3 CSI driver with B2
+    url: https://github.com/backblaze-b2-samples/b2-integration-mountpoint-csi
+    group: building-block
+    summary: Read-mostly B2 bucket mounts in Kubernetes pods for jobs that expect file paths
+    description: Uses the AWS Labs Mountpoint for Amazon S3 CSI driver with B2 so Kubernetes pods can mount a bucket read-mostly, for sim assets and training data that jobs expect as file paths.
+    architectures: [sim-rollout-datasets, policy-training-registry]
+
+  - id: awesome-physical-ai
+    name: Awesome Physical AI
+    url: https://github.com/backblaze-labs/awesome-physical-ai
+    group: domain
+    summary: Curated list of robotics foundation models, simulators, learning frameworks, teleop rigs, and datasets
+    description: Curated list of physical AI tools, including robotics foundation models, world models, simulators, teleoperation, sim-to-real, and embodied AI datasets.
+    architectures: []

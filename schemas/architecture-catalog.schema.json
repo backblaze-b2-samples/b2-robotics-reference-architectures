@@ -1,0 +1,146 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:backblaze:b2-robotics-reference-architectures:architecture-catalog:2",
+  "title": "B2 robotics architecture catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "updated", "canonical_documentation", "related_categories", "architectures"],
+  "properties": {
+    "schema_version": {"const": "2.0.0"},
+    "updated": {"type": "string", "format": "date"},
+    "canonical_documentation": {"type": "string", "format": "uri"},
+    "related_categories": {
+      "description": "The other B2 category reference-architecture repositories.",
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/relatedCategory"}
+    },
+    "architectures": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/architecture"}
+    },
+    "samples": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/sample"}
+    }
+  },
+  "$defs": {
+    "nonEmptyString": {"type": "string", "minLength": 1},
+    "stringList": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/nonEmptyString"},
+      "uniqueItems": true
+    },
+    "link": {
+      "type": ["string", "null"],
+      "minLength": 1
+    },
+    "integration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "role", "connection", "connection_type", "url"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9-]+$"},
+        "name": {"$ref": "#/$defs/nonEmptyString"},
+        "role": {"$ref": "#/$defs/nonEmptyString"},
+        "connection": {"$ref": "#/$defs/nonEmptyString"},
+        "connection_type": {
+          "description": "How the tool reaches B2. Values and display labels are defined by CONNECTION_LABELS in tools/generate_catalog.py.",
+          "enum": ["s3-custom-endpoint", "native-b2-option", "fsspec-s3", "presigned-url", "s3-sync-cli"]
+        },
+        "url": {"type": "string", "format": "uri"},
+        "setup_url": {"type": "string", "format": "uri"}
+      }
+    },
+    "sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "url", "group", "summary", "description"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9-]+$"},
+        "name": {"$ref": "#/$defs/nonEmptyString"},
+        "url": {"type": "string", "format": "uri"},
+        "group": {
+          "description": "workflow: closest match to a catalog workflow; building-block: reusable operational pattern; domain: industry-specific candidate.",
+          "enum": ["workflow", "building-block", "domain"]
+        },
+        "summary": {"$ref": "#/$defs/nonEmptyString"},
+        "description": {"$ref": "#/$defs/nonEmptyString"},
+        "architectures": {
+          "type": "array",
+          "items": {"type": "string", "pattern": "^[a-z0-9-]+$"},
+          "uniqueItems": true
+        },
+        "relevance": {"$ref": "#/$defs/nonEmptyString"}
+      }
+    },
+    "architecture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "slug",
+        "summary",
+        "audience",
+        "problem",
+        "workflow",
+        "capabilities",
+        "integrations",
+        "prerequisites",
+        "expected_scale",
+        "security_considerations",
+        "compliance_considerations",
+        "links"
+      ],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9-]+$"},
+        "name": {"$ref": "#/$defs/nonEmptyString"},
+        "slug": {"type": "string", "pattern": "^[a-z0-9-]+$"},
+        "summary": {"$ref": "#/$defs/nonEmptyString"},
+        "audience": {"$ref": "#/$defs/stringList"},
+        "problem": {"$ref": "#/$defs/nonEmptyString"},
+        "workflow": {"$ref": "#/$defs/stringList"},
+        "capabilities": {"$ref": "#/$defs/stringList"},
+        "integrations": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/integration"}
+        },
+        "prerequisites": {"$ref": "#/$defs/stringList"},
+        "expected_scale": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["profile", "notes"],
+          "properties": {
+            "profile": {"$ref": "#/$defs/nonEmptyString"},
+            "notes": {"$ref": "#/$defs/nonEmptyString"}
+          }
+        },
+        "security_considerations": {"$ref": "#/$defs/stringList"},
+        "compliance_considerations": {"$ref": "#/$defs/stringList"},
+        "links": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["architecture", "deployment"],
+          "properties": {
+            "architecture": {"$ref": "#/$defs/nonEmptyString"},
+            "deployment": {"$ref": "#/$defs/link"}
+          }
+        }
+      }
+    },
+    "relatedCategory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "url"],
+      "properties": {
+        "name": {"$ref": "#/$defs/nonEmptyString"},
+        "url": {"type": "string", "format": "uri"}
+      }
+    }
+  }
+}

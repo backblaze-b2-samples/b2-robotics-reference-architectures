@@ -1,0 +1,18 @@
+[
+  {
+    "corsRuleName": "foxglove-presigned-range-reads",
+    "allowedOrigins": ["https://app.foxglove.dev", "https://embed.foxglove.dev"],
+    "allowedOperations": ["s3_get", "s3_head"],
+    "allowedHeaders": ["range"],
+    "exposeHeaders": ["ETag", "Content-Type", "Accept-Ranges", "Content-Length"],
+    "maxAgeSeconds": 3600
+  },
+  {
+    "corsRuleName": "rerun-web-viewer-presigned-reads",
+    "allowedOrigins": ["https://<rerun-viewer-origin>"],
+    "allowedOperations": ["s3_get", "s3_head"],
+    "allowedHeaders": ["range"],
+    "exposeHeaders": ["ETag", "Content-Type", "Accept-Ranges", "Content-Length"],
+    "maxAgeSeconds": 3600
+  }
+]

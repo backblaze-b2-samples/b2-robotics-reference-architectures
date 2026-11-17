@@ -1,0 +1,28 @@
+{
+  "@context": "https://doi.org/10.5063/schema/codemeta-2.0",
+  "@type": "SoftwareSourceCode",
+  "name": "B2 Reference Architectures for Robotics",
+  "description": "Reference architectures, third-party integrations, and B2 sample applications for robot log offload, fleet replay, teleoperation datasets, simulation rollouts, policy training and release, and mapping archives with Backblaze B2.",
+  "version": "0.1.0",
+  "dateModified": "2026-10-14",
+  "url": "https://www.backblaze.com/docs/cloud-storage-ai-machine-learning",
+  "license": "https://spdx.org/licenses/MIT",
+  "programmingLanguage": ["Python"],
+  "keywords": [
+    "robotics",
+    "ros2",
+    "rosbag2",
+    "mcap",
+    "lerobot",
+    "imitation-learning",
+    "simulation",
+    "backblaze-b2",
+    "s3-compatible",
+    "reference-architecture"
+  ],
+  "author": {
+    "@type": "Organization",
+    "name": "Backblaze, Inc.",
+    "url": "https://www.backblaze.com/"
+  }
+}

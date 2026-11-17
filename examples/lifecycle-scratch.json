@@ -1,0 +1,10 @@
+[
+  {"fileNamePrefix": "rollouts/scratch/", "daysFromUploadingToHiding": 14, "daysFromHidingToDeleting": 1},
+  {"fileNamePrefix": "rollouts/", "daysFromUploadingToHiding": null, "daysFromHidingToDeleting": 7},
+  {"fileNamePrefix": "drafts/", "daysFromUploadingToHiding": 90, "daysFromHidingToDeleting": 7},
+  {"fileNamePrefix": "scans/", "daysFromUploadingToHiding": null, "daysFromHidingToDeleting": 7},
+  {"fileNamePrefix": "maps/", "daysFromUploadingToHiding": null, "daysFromHidingToDeleting": 7},
+  {"fileNamePrefix": "trajectories/", "daysFromUploadingToHiding": null, "daysFromHidingToDeleting": 7},
+  {"fileNamePrefix": "jobs/", "daysFromUploadingToHiding": 30, "daysFromHidingToDeleting": 1},
+  {"fileNamePrefix": "checkpoints/", "daysFromUploadingToHiding": null, "daysFromHidingToDeleting": 7}
+]
